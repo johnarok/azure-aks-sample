@@ -1,0 +1,11 @@
+.terraform
+internal
+usage
+terraform.tfstate
+terraform.tfstate.*
+regula
+sample-app
+tfplan
+tfplan.json
+tf.planfile
+*/tfplan.json

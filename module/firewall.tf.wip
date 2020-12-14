@@ -1,0 +1,215 @@
+
+resource "azurerm_subnet" "firewall_subnet" {
+  name                 = "fw-subnet"
+  resource_group_name  = azurerm_resource_group.primary.name
+  virtual_network_name = azurerm_virtual_network.cluster.name
+  address_prefixes     = ["10.0.3.0/24"]
+}
+
+
+resource "azurerm_route_table" "aks_fw_route" {
+  name                          = "aks-fw-route"
+  location                      = azurerm_resource_group.primary.location
+  resource_group_name           = azurerm_resource_group.primary.name
+  disable_bgp_route_propagation = false
+
+  route {
+    name           = "aks-fwrn"
+    address_prefix = "0.0.0.0/0"
+    next_hop_type  = "VirtualAppliance"
+    next_hop_in_ip_address = var.fwprivate_ip
+  }
+}
+
+resource "azurerm_subnet_route_table_association" "aks_fw_route_association" {
+  subnet_id      = azurerm_subnet.cluster.id
+  route_table_id = azurerm_route_table.aks_fw_route.id
+}
+
+
+resource "azurerm_public_ip" "fw_ip" {
+  name                = "fw-ip"
+  location            = azurerm_resource_group.primary.location
+  resource_group_name = azurerm_resource_group.primary.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+}
+
+resource "azurerm_firewall" "egress_firewall" {
+  name                = "egress_firewall"
+  location            = azurerm_resource_group.primary.location
+  resource_group_name = azurerm_resource_group.primary.name
+
+  ip_configuration {
+    name                 = "configuration"
+    subnet_id            = azurerm_subnet.firewall_subnet.id
+    public_ip_address_id = azurerm_public_ip.fw_ip.id
+  }
+}
+
+resource "azurerm_firewall_application_rule_collection" "egress_rules_fqdn" {
+
+  name                = "fw-aks-egress"
+  azure_firewall_name = azurerm_firewall.egress_firewall.name
+  resource_group_name = azurerm_resource_group.primary.name
+  priority            = 100
+  action              = "Allow"
+
+  rule {
+    name = "aks-rules-https"
+
+    source_addresses = ["${var.vnet_address_space}"]
+
+    target_fqdns = [
+      "*.hcp.${azurerm_resource_group.primary.location}.azmk8s.io",
+      "*.tun.${azurerm_resource_group.primary.location}.azmk8s.io",
+
+      "aksrepos.azurecr.io",
+      "*.blob.core.windows.net",
+      "mcr.microsoft.com",
+      "*.cdn.mscr.io",
+      "management.azure.com",
+      "login.microsoftonline.com",
+      "api.snapcraft.io",
+      "*.docker.io",
+
+      "*.ubuntu.com",
+      "packages.microsoft.com",
+      "dc.services.visualstudio.com",
+      "${var.log_analytics_workspace_id}.ods.opinsights.azure.com",
+      "${var.log_analytics_workspace_id}.oms.opinsights.azure.com",
+      "*.monitoring.azure.com",
+
+      "gov-prod-policy-data.trafficmanager.net",
+
+      "apt.dockerproject.org",
+      "nvidia.github.io",
+
+      // Tiller, remove with 3.0 or re-host
+      "gcr.io"
+    ]
+
+    protocol {
+      port = 443
+      type = "Https"
+    }
+  }
+
+  rule {
+    name = "aks-rules-http"
+
+    source_addresses = ["${var.vnet_address_space}"]
+
+    target_fqdns = [
+      "api.snapcraft.io",
+      "*.ubuntu.com"
+    ]
+
+    protocol {
+      port = 80
+      type = "Http"
+    }
+  }
+}
+
+# TODO: 
+resource "azurerm_firewall_network_rule_collection" "egress_rules_network" {
+  count               = "${local.cnt_deploy}"
+  name                = "aks-rules-cluster-egress"
+  azure_firewall_name = "${azurerm_firewall.firewall.*.name[0]}"
+  resource_group_name = "${var.resource_group_name}"
+  priority            = 150
+  action              = "Allow"
+
+  rule {
+    name = "ntp-ubuntu"
+
+    source_addresses = ["*"]
+
+    destination_ports = [
+      "123"
+    ]
+
+    destination_addresses = [
+      "91.189.89.199",
+      "91.189.89.198",
+      "91.189.94.4",
+      "91.189.91.157"
+    ]
+
+    protocols = [
+      "UDP"
+    ]
+  }
+
+  # TODO: Minimize surface via Azure DC list. Will change with tag Support.
+  rule {
+    name = "aks-rules-tunnel-front"
+
+    source_addresses = ["10.0.0.0/8"]
+
+    destination_ports = [
+      "22",
+      "9000"
+    ]
+
+    destination_addresses = [
+      "*"
+    ]
+
+    protocols = [
+      "TCP"
+    ]
+  }
+
+  # TODO: Minimize surface via Azure DC list. Will change with tag Support.
+  rule {
+    name = "aks-rules-internal-tls"
+
+    source_addresses = ["10.0.0.0/8"]
+
+    destination_ports = [
+      "443"
+    ]
+
+    destination_addresses = [
+      "*"
+    ]
+
+    protocols = [
+      "TCP"
+    ]
+  }
+}
+
+resource "azurerm_monitor_diagnostic_setting" "firewall_diagnostics" {
+  count                      = "${local.cnt_deploy}"
+  name                       = "firewall_diagnostics"
+  target_resource_id         = "${azurerm_firewall.firewall.*.id[0]}"
+  log_analytics_workspace_id = "${var.log_analytics_id}"
+
+  log {
+    category = "AzureFirewallApplicationRule"
+    enabled  = true
+    retention_policy {
+      enabled = false
+    }
+  }
+
+  log {
+    category = "AzureFirewallNetworkRule"
+    enabled  = true
+    retention_policy {
+      enabled = false
+    }
+  }
+
+  metric {
+    category = "AllMetrics"
+    enabled  = false
+
+    retention_policy {
+      enabled = false
+    }
+  }
+}
